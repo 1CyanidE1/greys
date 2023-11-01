@@ -35,6 +35,20 @@ ru = {
     'December': 'декабря'
 }
 
+services = {
+    "Однотонное покрытие": 90,
+    "Покрытие с дизайном на короткие ногти": 120,
+    "Покрытие с дизайном на любую длину натуральных ногтей": 120,
+    "Наращивание с любым дизайном (до 6)": 180,
+    "Коррекция наращивания с любым дизайном (до 6)": 150,
+    "Наращивание экстра длинны (от 6)": 240,
+    "Наращивание кошачьих когтей (до 6)": 240,
+    "Наращивание кошачьих когтей экстра длины (от 6)": 270,
+    "Другое": 180
+}
+
+services_list = list(services.keys())
+
 
 async def create_db_pool():
     return await asyncpg.create_pool(user='postgres', password='Efotod266', database='greys', host='127.0.0.1')
@@ -62,6 +76,14 @@ async def update_user_booking(user_id, book_date, book_time):
             await conn.execute('''
                 UPDATE users SET book_status = $1, book_date = $2, book_time = $3 WHERE user_id = $4
             ''', True, book_date_obj, book_time_obj, user_id)
+
+
+async def get_booked_times(date):
+    global pool
+    async with pool.acquire() as connection:
+        rows = await connection.fetch("SELECT book_time FROM users WHERE book_date = $1 AND book_status = true", date)
+        booked_times = [row['book_time'] for row in rows]
+        return booked_times
 
 
 async def check_active_booking(user_id):
@@ -113,7 +135,15 @@ def create_calendar(year=None, month=None):
     day_buttons = [InlineKeyboardButton(text=" ", callback_data="ignore") for _ in range(first_weekday)]
 
     for day in range(1, month_days + 1):
-        day_buttons.append(InlineKeyboardButton(text=str(day), callback_data=f"day-{day}"))
+
+        if datetime.date(year, month, day) <= today:
+            button_text = " "
+            callback_data = "ignore"
+        else:
+            button_text = str(day)
+            callback_data = f"day-{day}"
+
+        day_buttons.append(InlineKeyboardButton(text=button_text, callback_data=callback_data))
 
         if len(day_buttons) % 7 == 0 or day == month_days:
             if day == month_days and len(day_buttons) < 7:
@@ -133,20 +163,75 @@ def create_calendar(year=None, month=None):
         text=" ", callback_data="ignore")
 
     markup.add(prev_button, next_button)
-
     markup.add(InlineKeyboardButton(text="⬅️ Главное меню", callback_data="back"))
 
     return markup
 
 
-def create_time_slots_keyboard():
+# def create_time_slots_keyboard():
+#     markup = InlineKeyboardMarkup()
+#
+#     times = [(hour, minute) for hour in range(11, 20) for minute in [0, 30] if not (hour == 19 and minute == 30)]
+#     for i in range(0, len(times), 2):
+#         if i + 1 < len(times):
+#             button1 = InlineKeyboardButton(text=f"{times[i][0]}:{times[i][1]:02}",
+#                                            callback_data=f"time-{times[i][0]}:{times[i][1]:02}")
+#             button2 = InlineKeyboardButton(text=f"{times[i + 1][0]}:{times[i + 1][1]:02}",
+#                                            callback_data=f"time-{times[i + 1][0]}:{times[i + 1][1]:02}")
+#             markup.row(button1, button2)
+#         else:
+#             button = InlineKeyboardButton(text=f"{times[i][0]}:{times[i][1]:02}",
+#                                           callback_data=f"time-{times[i][0]}:{times[i][1]:02}")
+#             markup.add(button)
+#
+#     return markup
+
+
+async def is_time_slot_available(user_id, time_slot, service):
+    duration = services[service]
+    end_time = (time_slot[0] * 60 + time_slot[1] + duration) // 60, (time_slot[0] * 60 + time_slot[1] + duration) % 60
+    if user_id not in date['month']:
+        date_object = datetime.date(year=datetime.datetime.now().year, month=datetime.datetime.now().month,
+                                    day=int(date['day'][user_id]))
+    else:
+        date_object = datetime.date(year=datetime.datetime.now().year, month=int(date['month'][user_id]),
+                                    day=int(date['day'][user_id]))
+
+    booked_times = await get_booked_times(date_object)
+
+    booked_time_slots = [(time.hour, time.minute) for time in booked_times]
+
+    for hour, minute in [(h, m) for h in range(time_slot[0], end_time[0] + 1) for m in [0, 30]]:
+        if (hour, minute) in booked_time_slots:
+            return False
+    return True
+
+
+async def create_time_slots_keyboard(user_id, date, service):
+    markup = InlineKeyboardMarkup(row_width=2)
+
+    # Запрашиваем занятые слоты из базы данных
+    booked_times = await get_booked_times(date)
+
+    # Преобразование booked_times в удобный список
+    booked_time_slots = [tuple(map(int, time.split(":"))) for time in booked_times]
+
+    times = [(h, m) for h in range(11, 19) for m in [0, 30]]
+
+    for hour, minute in times:
+        time_slot = (hour, minute)
+        if time_slot not in booked_time_slots and await is_time_slot_available(user_id, time_slot, service):
+            markup.add(InlineKeyboardButton(text=f"{hour}:{minute:02}", callback_data=f"time-{hour}:{minute}"))
+
+    return markup
+
+
+def create_service_keyboard():
     markup = InlineKeyboardMarkup()
-    times = ["11:00", "13:00", "17:00", "20:00"]
 
-    for time in times:
-        markup.add(InlineKeyboardButton(text=time, callback_data=f"time-{time}"))
+    for index, service in enumerate(services):
+        markup.add(InlineKeyboardButton(text=service, callback_data=f"service-{index}"))
 
-    markup.add(InlineKeyboardButton(text="⬅️ Главное меню", callback_data="back"))
     return markup
 
 
@@ -258,10 +343,10 @@ async def personal_cabinet(callback_query: types.CallbackQuery):
 
                     await bot.edit_message_text(
                         f"Рады снова видеть, *{user}*!\n"
-                        f"У вас сейчас *{points}* баллов.\n\n"
-                        f"Так же, у вас есть запись на {book_date.strftime('%d')} {ru[book_date.strftime('%B')]} число"
+                        f"У Вас сейчас *{points}* баллов.\n\n"
+                        f"Так же, у Вас есть запись на {book_date.strftime('%d')} {ru[book_date.strftime('%B')]} число"
                         f" в {book_time.strftime('%H:%M')} часов.\n"
-                        f"Очень ждем вас!",
+                        f"Очень ждем!",
                         callback_query.from_user.id,
                         callback_query.message.message_id,
                         reply_markup=markup,
@@ -270,9 +355,9 @@ async def personal_cabinet(callback_query: types.CallbackQuery):
                 else:
                     await bot.edit_message_text(
                         f"Рады снова видеть, *{user}*!\n"
-                        f"У вас сейчас *{points}* баллов.\n"
+                        f"У Вас сейчас *{points}* баллов.\n"
                         f"К сожалению, У вас сейчас нет активных записей, "
-                        f"но мы вас очень ждем!",
+                        f"но мы Вас очень ждем!",
                         callback_query.from_user.id,
                         callback_query.message.message_id,
                         reply_markup=get_back_markup(),
@@ -286,10 +371,10 @@ async def personal_cabinet(callback_query: types.CallbackQuery):
 
                     await bot.edit_message_text(
                         f"Рады снова видеть, *{user}*!\n"
-                        f"У тебя сейчас *{points}* баллов.\n\n"
-                        f"Так же, у вас есть запись на {book_date.strftime('%d')} {ru[book_date.strftime('%B')]} число"
+                        f"У Вас сейчас *{points}* баллов.\n\n"
+                        f"Так же, у Вас есть запись на {book_date.strftime('%d')} {ru[book_date.strftime('%B')]} число"
                         f" в {book_time.strftime('%H:%M')} часов.\n"
-                        f"Очень ждем вас!",
+                        f"Очень ждем!",
                         callback_query.from_user.id,
                         callback_query.message.message_id,
                         reply_markup=markup,
@@ -298,8 +383,35 @@ async def personal_cabinet(callback_query: types.CallbackQuery):
                 else:
                     await bot.edit_message_text(
                         f"Рады снова видеть, *{user}*!\n"
-                        f"У тебя сейчас *{points}* баллов.\n"
-                        f"Приходи, что бы их потратить!",
+                        f"У Вас сейчас *{points}* баллов.\n"
+                        f"Приходите, что бы их потратить!",
+                        callback_query.from_user.id,
+                        callback_query.message.message_id,
+                        reply_markup=get_back_markup(),
+                        parse_mode=ParseMode.MARKDOWN)
+
+            if visits == 0 and points == 200:
+
+                if booking_info:
+                    book_date = booking_info['book_date']
+                    book_time = booking_info['book_time']
+
+                    await bot.edit_message_text(
+                        f"Добро пожаловать, *{user}*!\n"
+                        f"У Вас сейчас *{points}* баллов.\n\n"
+                        f"Так же, у Вас есть запись на {book_date.strftime('%d')} {ru[book_date.strftime('%B')]} число"
+                        f" в {book_time.strftime('%H:%M')} часов.\n"
+                        f"Очень ждем!",
+                        callback_query.from_user.id,
+                        callback_query.message.message_id,
+                        reply_markup=markup,
+                        parse_mode=ParseMode.MARKDOWN)
+
+                else:
+                    await bot.edit_message_text(
+                        f"Добро пожаловать, *{user}*!\n"
+                        f"У Вас сейчас *{points}* баллов.\n"
+                        f"Приходите, что бы их потратить!",
                         callback_query.from_user.id,
                         callback_query.message.message_id,
                         reply_markup=get_back_markup(),
@@ -401,20 +513,60 @@ async def process_month_navigation(callback_query: types.CallbackQuery, state: F
                                 text="Выберите дату:", reply_markup=markup)
 
 
+# @dp.callback_query_handler(lambda c: c.data.startswith('day-'))
+# async def process_day_selection(callback_query: types.CallbackQuery, state: FSMContext):
+#     print(callback_query.data)
+#     current_day = datetime.datetime.now().date()
+#     selected_day = callback_query.data.split('-')[1]
+#     user_id = callback_query.from_user.id
+#
+#     global date
+#     date['day'][user_id] = selected_day
+#
+#     markup = create_time_slots_keyboard()
+#     await bot.edit_message_text(chat_id=callback_query.from_user.id,
+#                                 message_id=callback_query.message.message_id,
+#                                 text=f"Вы выбрали {selected_day} число. Теперь выберите удобное для вас время:",
+#                                 reply_markup=markup)
+
+
 @dp.callback_query_handler(lambda c: c.data.startswith('day-'))
 async def process_day_selection(callback_query: types.CallbackQuery, state: FSMContext):
-    print(callback_query.data)
-    current_day = datetime.datetime.now().date()
     selected_day = callback_query.data.split('-')[1]
     user_id = callback_query.from_user.id
 
     global date
     date['day'][user_id] = selected_day
 
-    markup = create_time_slots_keyboard()
+    markup = create_service_keyboard()
     await bot.edit_message_text(chat_id=callback_query.from_user.id,
                                 message_id=callback_query.message.message_id,
-                                text=f"Вы выбрали {selected_day} число. Теперь выберите удобное для вас время:",
+                                text=f"Теперь выберите услугу:",
+                                reply_markup=markup)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('service-'))
+async def process_service_selection(callback_query: types.CallbackQuery, state: FSMContext):
+    # Получаем имя услуги из callback_data
+    selected_service_index = int(callback_query.data.split('-')[1])
+    selected_service_name = services_list[selected_service_index]
+
+    await state.update_data(selected_service=selected_service_name)
+
+    if selected_service_name == "Другое":
+        await bot.send_message(chat_id=callback_query.from_user.id, text="Пожалуйста, опишите, что вы хотите.")
+        return
+
+    # Получаем текущую дату или дату, которую вы хотите использовать для бронирования
+    current_date = datetime.date.today()  # или другая дата, которую вы решите использовать
+
+    # Получаем клавиатуру временных слотов
+    markup = await create_time_slots_keyboard(callback_query.from_user.id, current_date, selected_service_name)
+
+    await bot.edit_message_text(chat_id=callback_query.from_user.id,
+                                message_id=callback_query.message.message_id,
+                                text=f"Вы выбрали услугу: {selected_service_name}. Теперь выберите удобное для вас "
+                                     f"время:",
                                 reply_markup=markup)
 
 
@@ -443,7 +595,7 @@ async def process_time_selection(callback_query: types.CallbackQuery, state: FSM
 
     await bot.edit_message_text(chat_id=callback_query.from_user.id,
                                 message_id=callback_query.message.message_id,
-                                text=f"Вы записались на {selected_day} число, время {selected_time}. Спасибо!\n"
+                                text=f"Вы записались на {selected_day}, время {selected_time}. Спасибо!\n"
                                      f"Отслеживать свою запись вы можете в личном кабинете, там же, при необходимости, ее можно отменить.",
                                 reply_markup=get_back_markup())
 
